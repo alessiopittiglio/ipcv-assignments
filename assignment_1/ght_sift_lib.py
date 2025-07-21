@@ -169,29 +169,30 @@ class SIFT_GHT_Detector:
 
         return accumulator
 
-    def calculate_homography(self, model_image, good_matches, model, target_features):
+    def calculate_homography(self, model_image, matches, model, target_features):
         MIN_MATCH_COUNT = 10
-        if len(good_matches) > MIN_MATCH_COUNT:
-            src_pts = np.float32(
-                [model.features[m.queryIdx].position for m in good_matches]
-            ).reshape(-1, 2)
-            dst_pts = np.float32(
-                [target_features[m.trainIdx].position for m in good_matches]
-            ).reshape(-1, 2)
-
-            M, _ = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
-            h, w = model_image.shape[:2]
-            pts = np.float32([[0, 0], [0, h - 1], [w - 1, h - 1], [w - 1, 0]]).reshape(
-                -1, 1, 2
-            )
-            dst = cv2.perspectiveTransform(pts, M)
-            return np.int32(dst)
-        else:
-            print(
-                "Not enough matches are found - %d/%d"
-                % (len(good_matches), MIN_MATCH_COUNT)
-            )
+        if len(matches) < MIN_MATCH_COUNT:
             return None
+
+        src_pts = np.float32(
+            [model.features[m.queryIdx].position for m in matches]
+        ).reshape(-1, 1, 2)
+        dst_pts = np.float32(
+            [target_features[m.trainIdx].position for m in matches]
+        ).reshape(-1, 1, 2)
+
+        M, _ = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
+
+        if M is None:
+            return None
+
+        h, w = model_image.shape[:2]
+        pts = np.float32([[0, 0], [0, h - 1], [w - 1, h - 1], [w - 1, 0]]).reshape(
+            -1, 1, 2
+        )
+        dst = cv2.perspectiveTransform(pts, M)
+
+        return np.int32(dst)
 
     def detect(self, model_image, target_image):
         model = self.build_model(model_image)
