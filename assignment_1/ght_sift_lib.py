@@ -208,6 +208,77 @@ class SIFT_GHT_Detector:
 
         return max_loc, accumulator, bounding_box
 
+    def detect_multiple(self, model_image, scene_image, min_votes=4, verbose=True):
+        """
+        Detects multiple instances of a model in a scene using an iterative
+        "detect and mask" approach.
+        """
+        detections = []
+        current_scene = scene_image.copy()
+
+        model = self.build_model(model_image)
+
+        for i in range(10):
+            # Extract features from the current (potentially masked) scene
+            target_features = self.detect_and_compute(current_scene)
+            if len(target_features) < 10:  # Not enough features to find anything
+                if verbose:
+                    print("Not enough features left in the scene.")
+                break
+
+            # Match features
+            good_matches = self.match_features(model, target_features)
+            if verbose:
+                print(f"Found {len(good_matches)} good matches.")
+            if len(good_matches) < 10:
+                if verbose:
+                    print("Not enough matches to form a reliable hypothesis.")
+                break
+
+            # Vote in the accumulator
+            accumulator = Accumulator(current_scene.shape)
+            accumulator = self.vote_for_reference_points(
+                model, target_features, good_matches, current_scene.shape
+            )
+
+            # Find the strongest peak
+            peak_indices, peak_vote_count = accumulator.get_peak()
+
+            if peak_indices is None or peak_vote_count < min_votes:
+                if verbose:
+                    print(
+                        f"Strongest peak has {peak_vote_count} votes, below threshold of {min_votes}. Stopping."
+                    )
+                break
+
+            # Get matches from the peak and calculate homography
+            bounding_box = self.calculate_homography(
+                model_image, good_matches, model, target_features
+            )
+
+            if (
+                bounding_box is not None
+                and cv2.contourArea(bounding_box.reshape(4, 2)) > 1000
+            ):
+                corners = {
+                    "top_left": tuple(int(x) for x in bounding_box[0][0]),
+                    "bottom_left": tuple(int(x) for x in bounding_box[1][0]),
+                    "bottom_right": tuple(int(x) for x in bounding_box[2][0]),
+                    "top_right": tuple(int(x) for x in bounding_box[3][0]),
+                }
+                area = cv2.contourArea(bounding_box)
+                detections.append(
+                    {
+                        "corners_list": bounding_box,
+                        "corners_dict": corners,
+                        "area": area,
+                    }
+                )
+
+                current_scene = mask_scene(current_scene, bounding_box)
+
+        return detections
+
 
 # ======================================================================================
 #  DEBUGGING AND VISUALIZATION FUNCTIONS
@@ -242,6 +313,36 @@ def visualize_joining_vectors(image, model, num_vectors=3):
 
     plt.imshow(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
     plt.show()
+
+
+def shrink_polygon(polygon, width_ratio=1.0, height_ratio=1.0):
+    """
+    Shrink a polygon towards its centroid with separate width and height scaling.
+
+    Args:
+        polygon: (N, 2) array of polygon vertices.
+        width_ratio: ratio for x-axis (1 = no shrink, 0 = collapse).
+        height_ratio: ratio for y-axis (1 = no shrink, 0 = collapse).
+
+    Returns:
+        (N, 2) array of shrunken polygon vertices.
+    """
+    centroid = np.mean(polygon, axis=0)
+    dx = (polygon[:, 0] - centroid[0]) * width_ratio
+    dy = (polygon[:, 1] - centroid[1]) * height_ratio
+    new_x = centroid[0] + dx
+    new_y = centroid[1] + dy
+    return np.stack((new_x, new_y), axis=1).astype(np.int32)
+
+
+def mask_scene(scene_image, bounding_box):
+    dst_shrunken = shrink_polygon(bounding_box.reshape(4, 2), width_ratio=0.6, height_ratio=0.9)
+    mask = np.ones(scene_image.shape, dtype=np.uint8) * 255
+    cv2.fillConvexPoly(mask, dst_shrunken, 0)
+    img_masked = cv2.bitwise_and(scene_image, mask)
+    return img_masked
+
+
 
 def natural_sort_key(s):
     return [
