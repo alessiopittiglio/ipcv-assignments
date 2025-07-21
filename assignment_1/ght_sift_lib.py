@@ -39,6 +39,8 @@ class Accumulator:
         self.scale_factor = scale_factor
         self.scale_bins = scale_bins
         self.rotation_bins = rotation_bins
+        self.min_scale = 0.4
+        self.max_scale = 0.75
         self.accumulator_size = (
             int(image_shape[0] / scale_factor),
             int(image_shape[1] / scale_factor),
@@ -71,12 +73,15 @@ class Accumulator:
         ]
 
     def quantize_scale_rotation(self, scale_ratio, rotation_angle):
-        scale_idx = int(
-            min(self.scale_bins - 1, max(0, scale_ratio * (self.scale_bins / 2)))
-        )
-        rotation_idx = (
-            int(rotation_angle / (360 / self.rotation_bins)) % self.rotation_bins
-        )
+        # Quantize scale
+        scale_bin_width = (self.max_scale - self.min_scale) / self.scale_bins
+        scale_idx = int((scale_ratio - self.min_scale) / scale_bin_width)
+        scale_idx = max(0, min(self.scale_bins - 1, scale_idx))
+
+        # Quantize rotation
+        rotation_bin_width = 360 / self.rotation_bins
+        rotation_idx = int(rotation_angle / rotation_bin_width) % self.rotation_bins
+
         return scale_idx, rotation_idx
 
 
@@ -132,9 +137,9 @@ class SIFT_GHT_Detector:
         return rotated_vector
 
     def vote_for_reference_points(
-        self, model, target_features, good_matches, target_image_shape, scale_factor=1
+        self, model, target_features, good_matches, target_image_shape
     ):
-        accumulator = Accumulator(target_image_shape[:2], scale_factor)
+        accumulator = Accumulator(target_image_shape[:2])
 
         for match in good_matches:
             model_idx = match.queryIdx
