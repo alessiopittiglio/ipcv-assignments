@@ -343,6 +343,24 @@ def mask_scene(scene_image, bounding_box):
     return img_masked
 
 
+def format_and_print_results(all_results, scene_filename):
+    print(f"Results for scene: {scene_filename}")
+    print("------------------------------------")
+    if not all_results:
+        print("No books found.")
+        return
+
+    for book_name, instances in all_results.items():
+        print(f"{book_name} - {len(instances)} instance(s) found:")
+        for i, inst in enumerate(instances, 1):
+            corners = inst["corners_dict"]
+            area = inst["area"]
+            print(
+                f"  Instance {i} {{top_left: {corners['top_left']}, top_right: {corners['top_right']}, "
+                f"bottom_right: {corners['bottom_right']}, bottom_left: {corners['bottom_left']}, area: {area:.0f}px}}"
+            )
+    print("\n" + "=" * 50)
+
 
 def natural_sort_key(s):
     return [
