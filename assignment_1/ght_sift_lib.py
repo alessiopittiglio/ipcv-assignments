@@ -1,4 +1,5 @@
 import cv2
+import re
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -235,3 +236,8 @@ def visualize_joining_vectors(image, model, num_vectors=3):
 
     plt.imshow(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
     plt.show()
+
+def natural_sort_key(s):
+    return [
+        int(text) if text.isdigit() else text.lower() for text in re.split(r"(\d+)", s)
+    ]
