@@ -1,12 +1,18 @@
-import cv2
+import math
 import re
+import logging
+
+import cv2
 import numpy as np
 import matplotlib.pyplot as plt
+from scipy.ndimage import maximum_filter
+
+logger = logging.getLogger(__name__)
 
 
 class Feature:
     def __init__(self, keypoint, descriptor):
-        self.position = keypoint.pt
+        self.position = np.array(keypoint.pt)
         self.angle = keypoint.angle
         self.size = keypoint.size
         self.descriptor = descriptor
@@ -24,75 +30,101 @@ class StarModel:
     def compute_barycenter(self):
         if not self.features:
             return None
-        points = np.array([feature.position for feature in self.features])
+        points = np.array([f.position for f in self.features])
         self.barycenter = np.mean(points, axis=0)
+        return self.barycenter
 
-    def computing_joining_vector(self):
+    def compute_joining_vectors(self):
         if self.barycenter is None:
             return None
         for feature in self.features:
-            feature.joining_vector = self.barycenter - np.array(feature.position)
+            feature.joining_vector = self.barycenter - feature.position
 
 
 class Accumulator:
-    def __init__(self, image_shape, scale_bins=3, rotation_bins=8, scale_factor=1):
-        self.scale_factor = scale_factor
-        self.scale_bins = scale_bins
-        self.rotation_bins = rotation_bins
-        self.min_scale = 0.4
-        self.max_scale = 0.75
-        self.accumulator_size = (
-            int(image_shape[0] / scale_factor),
-            int(image_shape[1] / scale_factor),
-            scale_bins,
-            rotation_bins,
-        )
-        self.accumulator = np.zeros(self.accumulator_size, dtype=np.float32)
+    def __init__(self, image_shape, bin_size=2):
+        self.image_height, self.image_width = image_shape
+        self.bin_size = bin_size
 
-    def vote(self, predicted_reference_pixel, scale_idx, rotation_idx):
-        x_scaled = predicted_reference_pixel[0] // self.scale_factor
-        y_scaled = predicted_reference_pixel[1] // self.scale_factor
+        grid_height = math.ceil(self.image_height / self.bin_size)
+        grid_width = math.ceil(self.image_width / self.bin_size)
 
-        h, w, s_bins, r_bins = self.accumulator_size
-        if (
-            0 <= x_scaled < w
-            and 0 <= y_scaled < h
-            and 0 <= scale_idx < s_bins
-            and 0 <= rotation_idx < r_bins
-        ):
-            self.accumulator[y_scaled, x_scaled, scale_idx, rotation_idx] += 1
-
-    def get_peak(self):
-        max_idx = np.unravel_index(np.argmax(self.accumulator), self.accumulator.shape)
-        peak_x = max_idx[1] * self.scale_factor
-        peak_y = max_idx[0] * self.scale_factor
-        scale_idx = max_idx[2]
-        rotation_idx = max_idx[3]
-        return (int(peak_x), int(peak_y), scale_idx, rotation_idx), self.accumulator[
-            max_idx
+        self.grid = np.zeros((grid_height, grid_width), dtype=np.int32)
+        self.votes_per_bin = [
+            [[] for _ in range(grid_width)] for _ in range(grid_height)
         ]
 
-    def quantize_scale_rotation(self, scale_ratio, rotation_angle):
-        # Quantize scale
-        scale_bin_width = (self.max_scale - self.min_scale) / self.scale_bins
-        scale_idx = int((scale_ratio - self.min_scale) / scale_bin_width)
-        scale_idx = max(0, min(self.scale_bins - 1, scale_idx))
+    def _quantize(self, point):
+        x, y = point
+        bin_x = int(x / self.bin_size)
+        bin_y = int(y / self.bin_size)
+        return bin_y, bin_x
 
-        # Quantize rotation
-        rotation_bin_width = 360 / self.rotation_bins
-        rotation_idx = int(rotation_angle / rotation_bin_width) % self.rotation_bins
+    def vote(self, point, match):
+        x, y = point
+        if not (0 <= x < self.image_width and 0 <= y < self.image_height):
+            return
+        bin_y, bin_x = self._quantize(point)
+        self.grid[bin_y, bin_x] += 1
+        self.votes_per_bin[bin_y][bin_x].append(match)
 
-        return scale_idx, rotation_idx
+    def find_peaks(self, min_votes=4, nms_window_size=5):
+        if self.grid.max() < min_votes:
+            return []
+
+        thresholded_grid = self.grid.copy()
+        thresholded_grid[thresholded_grid < min_votes] = 0
+
+        local_max = maximum_filter(thresholded_grid, size=nms_window_size)
+        peaks_mask = (thresholded_grid == local_max) & (thresholded_grid > 0)
+        peak_indices = np.argwhere(peaks_mask)
+
+        peaks = []
+        for bin_y, bin_x in peak_indices:
+            center_x = (bin_x + 0.5) * self.bin_size
+            center_y = (bin_y + 0.5) * self.bin_size
+
+            peaks.append(
+                {
+                    "position": (center_x, center_y),
+                    "votes": self.grid[bin_y, bin_x],
+                    "contributing_matches": self.votes_per_bin[bin_y][bin_x],
+                }
+            )
+
+        peaks.sort(key=lambda p: p["votes"], reverse=True)
+        return peaks
 
 
-class SIFT_GHT_Detector:
-    def __init__(self):
+class SiftGhtDetector:
+    def __init__(
+        self,
+        bin_size=6,
+        k=5,
+        ratio_threshold=0.7,
+        min_votes=2,
+        nms_window_size=5,
+        min_match_count=4,
+        min_area=1000,
+        verbose=False,
+    ):
         self.sift = cv2.SIFT_create()
-        self.model = None
+        self.bin_size = bin_size
+        self.k = k
+        self.ratio_threshold = ratio_threshold
+        self.min_votes = min_votes
+        self.nms_window_size = nms_window_size
+        self.min_match_count = min_match_count
+        self.min_area = min_area
+        self.verbose = verbose
 
     def detect_and_compute(self, image):
         keypoints, descriptors = self.sift.detectAndCompute(image, None)
         features = [Feature(kp, desc) for kp, desc in zip(keypoints, descriptors)]
+
+        if self.verbose:
+            logger.info(f"Detected {len(features)} features.")
+
         return features
 
     def build_model(self, model_image):
@@ -101,30 +133,46 @@ class SIFT_GHT_Detector:
         for feature in features:
             model.add_feature(feature)
         model.compute_barycenter()
-        model.computing_joining_vector()
+        model.compute_joining_vectors()
+
+        if self.verbose:
+            logger.info(
+                f"Model built with {len(model.features)} features. "
+                f"Barycenter: {model.barycenter}."
+            )
+
         return model
 
     def match_features(self, model, target_features):
-        model_descriptors = np.array([feature.descriptor for feature in model.features])
-        target_descriptors = np.array(
-            [feature.descriptor for feature in target_features]
-        )
+        model_descriptors = np.array([f.descriptor for f in model.features])
+        target_descriptors = np.array([f.descriptor for f in target_features])
 
         FLANN_INDEX_KDTREE = 1
         index_params = dict(algorithm=FLANN_INDEX_KDTREE, trees=5)
         search_params = dict(checks=50)
         flann = cv2.FlannBasedMatcher(index_params, search_params)
-        matches = flann.knnMatch(model_descriptors, target_descriptors, k=2)
 
+        knn_matches = flann.knnMatch(target_descriptors, model_descriptors, k=2)
         good_matches = []
-        for m, n in matches:
-            if m.distance < 0.75 * n.distance:
-                good_matches.append(m)
+
+        for match_pair in knn_matches:
+            if len(match_pair) < 2:
+                continue
+
+            m, n = match_pair
+            if m.distance < self.ratio_threshold * n.distance:
+                good_match = cv2.DMatch(
+                    _queryIdx=m.trainIdx, _trainIdx=m.queryIdx, _distance=m.distance
+                )
+                good_matches.append(good_match)
+
+        if self.verbose:
+            logger.info(f"Found {len(good_matches)} good matches.")
+
         return good_matches
 
     def apply_scale_rotation(self, joining_vector, scale, rotation):
         scaled_vector = scale * joining_vector
-
         angle_rad = np.deg2rad(rotation)
         rotation_matrix = np.array(
             [
@@ -132,15 +180,13 @@ class SIFT_GHT_Detector:
                 [np.sin(angle_rad), np.cos(angle_rad)],
             ]
         )
-
         rotated_vector = np.dot(rotation_matrix, scaled_vector)
         return rotated_vector
 
     def vote_for_reference_points(
         self, model, target_features, good_matches, target_image_shape
     ):
-        accumulator = Accumulator(target_image_shape[:2])
-
+        accumulator = Accumulator(target_image_shape[:2], bin_size=self.bin_size)
         for match in good_matches:
             model_idx = match.queryIdx
             target_idx = match.trainIdx
@@ -149,29 +195,20 @@ class SIFT_GHT_Detector:
             target_feature = target_features[target_idx]
 
             scale_ratio = target_feature.size / model_feature.size
-            rotation_diff = (target_feature.angle - model_feature.angle) % 360
+            rotation_diff = target_feature.angle - model_feature.angle
 
-            scale_idx, rotation_idx = accumulator.quantize_scale_rotation(
-                scale_ratio, rotation_diff
-            )
-
-            transformed_joining_vector = self.apply_scale_rotation(
+            transformed_vector = self.apply_scale_rotation(
                 model_feature.joining_vector, scale_ratio, rotation_diff
             )
-            predicted_reference_pixel = (
-                np.array(target_feature.position) + transformed_joining_vector
-            )
-            predicted_reference_pixel = np.round(predicted_reference_pixel).astype(
-                np.int32
-            )
-
-            accumulator.vote(predicted_reference_pixel, scale_idx, rotation_idx)
+            predicted_reference = target_feature.position + transformed_vector
+            accumulator.vote(predicted_reference, match)
 
         return accumulator
 
     def calculate_homography(self, model_image, matches, model, target_features):
-        MIN_MATCH_COUNT = 10
-        if len(matches) < MIN_MATCH_COUNT:
+        if len(matches) < self.min_match_count:
+            if self.verbose:
+                logger.info("Not enough matches to compute homography.")
             return None
 
         src_pts = np.float32(
@@ -184,13 +221,29 @@ class SIFT_GHT_Detector:
         M, _ = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
 
         if M is None:
+            if self.verbose:
+                logger.info("Homography estimation failed.")
             return None
 
         h, w = model_image.shape[:2]
-        pts = np.float32([[0, 0], [0, h - 1], [w - 1, h - 1], [w - 1, 0]]).reshape(
+        corners = np.float32([[0, 0], [0, h - 1], [w - 1, h - 1], [w - 1, 0]]).reshape(
             -1, 1, 2
         )
-        dst = cv2.perspectiveTransform(pts, M)
+        dst = cv2.perspectiveTransform(corners, M)
+
+        area = cv2.contourArea(dst)
+        min_coord = dst.min()
+
+        if area > self.min_area and min_coord >= 0:
+            if self.verbose:
+                logger.info(f"Valid homography found. Bounding box area: {area:.2f}")
+            return np.int32(dst)
+
+        M_affine, _ = cv2.estimateAffinePartial2D(src_pts, dst_pts, method=cv2.RANSAC)
+        dst = cv2.transform(corners, M_affine)
+
+        if self.verbose:
+            logger.info("Fallback to affine transformation.")
 
         return np.int32(dst)
 
@@ -198,86 +251,44 @@ class SIFT_GHT_Detector:
         model = self.build_model(model_image)
         target_features = self.detect_and_compute(target_image)
         good_matches = self.match_features(model, target_features)
+
         accumulator = self.vote_for_reference_points(
             model, target_features, good_matches, target_image.shape
         )
-        max_loc, _ = accumulator.get_peak()
-        bounding_box = self.calculate_homography(
-            model_image, good_matches, model, target_features
+
+        peaks = accumulator.find_peaks(
+            min_votes=self.min_votes, nms_window_size=self.nms_window_size
         )
 
-        return max_loc, accumulator, bounding_box
+        if self.verbose:
+            logger.info(f"Found {len(peaks)} peaks in accumulator.")
 
-    def detect_multiple(self, model_image, scene_image, min_votes=4, verbose=True):
-        """
-        Detects multiple instances of a model in a scene using an iterative
-        "detect and mask" approach.
-        """
-        detections = []
-        current_scene = scene_image.copy()
-
-        model = self.build_model(model_image)
-
-        for i in range(10):
-            # Extract features from the current (potentially masked) scene
-            target_features = self.detect_and_compute(current_scene)
-            if len(target_features) < 10:  # Not enough features to find anything
-                if verbose:
-                    print("Not enough features left in the scene.")
-                break
-
-            # Match features
-            good_matches = self.match_features(model, target_features)
-            if verbose:
-                print(f"Found {len(good_matches)} good matches.")
-            if len(good_matches) < 10:
-                if verbose:
-                    print("Not enough matches to form a reliable hypothesis.")
-                break
-
-            # Vote in the accumulator
-            accumulator = Accumulator(current_scene.shape)
-            accumulator = self.vote_for_reference_points(
-                model, target_features, good_matches, current_scene.shape
+        bounding_boxes = []
+        for peak in peaks:
+            matches = peak["contributing_matches"]
+            bbox = self.calculate_homography(
+                model_image, matches, model, target_features
             )
-
-            # Find the strongest peak
-            peak_indices, peak_vote_count = accumulator.get_peak()
-
-            if peak_indices is None or peak_vote_count < min_votes:
-                if verbose:
-                    print(
-                        f"Strongest peak has {peak_vote_count} votes, below threshold of {min_votes}. Stopping."
-                    )
-                break
-
-            # Get matches from the peak and calculate homography
-            bounding_box = self.calculate_homography(
-                model_image, good_matches, model, target_features
-            )
-
-            if (
-                bounding_box is not None
-                and cv2.contourArea(bounding_box.reshape(4, 2)) > 1000
-            ):
-                corners = {
-                    "top_left": tuple(int(x) for x in bounding_box[0][0]),
-                    "bottom_left": tuple(int(x) for x in bounding_box[1][0]),
-                    "bottom_right": tuple(int(x) for x in bounding_box[2][0]),
-                    "top_right": tuple(int(x) for x in bounding_box[3][0]),
-                }
-                area = cv2.contourArea(bounding_box)
-                detections.append(
+            if bbox is not None:
+                bounding_boxes.append(
                     {
-                        "corners_list": bounding_box,
-                        "corners_dict": corners,
-                        "area": area,
+                        "position": peak["position"],
+                        "votes": peak["votes"],
+                        "bounding_box": bbox,
+                        "corners_dict": {
+                            "top_left": tuple(bbox[0][0]),
+                            "top_right": tuple(bbox[1][0]),
+                            "bottom_right": tuple(bbox[2][0]),
+                            "bottom_left": tuple(bbox[3][0]),
+                        },
+                        "area": cv2.contourArea(bbox),
                     }
                 )
 
-                current_scene = mask_scene(current_scene, bounding_box)
+        if self.verbose:
+            logger.info(f"Detected {len(bounding_boxes)} model instances.")
 
-        return detections
+        return peaks, accumulator, bounding_boxes
 
 
 # ======================================================================================
@@ -287,17 +298,17 @@ class SIFT_GHT_Detector:
 
 def visualize_barycenter(image, model):
     image = image.copy()
-
-    plt.imshow(image)
+    plt.imshow(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
     plt.scatter(*model.barycenter, color="black", s=60)
     plt.scatter(*model.barycenter, color="red", s=50)
-    plt.imshow(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
     plt.show()
 
 
 def visualize_joining_vectors(image, model, num_vectors=3):
     image = image.copy()
-    for i in np.random.choice(len(model.features), num_vectors, replace=False):
+
+    indices = np.random.choice(len(model.features), num_vectors, replace=False)
+    for i in indices:
         start_point = model.features[i].position
         joining_vector = model.features[i].joining_vector
         plt.arrow(
@@ -315,34 +326,6 @@ def visualize_joining_vectors(image, model, num_vectors=3):
     plt.show()
 
 
-def shrink_polygon(polygon, width_ratio=1.0, height_ratio=1.0):
-    """
-    Shrink a polygon towards its centroid with separate width and height scaling.
-
-    Args:
-        polygon: (N, 2) array of polygon vertices.
-        width_ratio: ratio for x-axis (1 = no shrink, 0 = collapse).
-        height_ratio: ratio for y-axis (1 = no shrink, 0 = collapse).
-
-    Returns:
-        (N, 2) array of shrunken polygon vertices.
-    """
-    centroid = np.mean(polygon, axis=0)
-    dx = (polygon[:, 0] - centroid[0]) * width_ratio
-    dy = (polygon[:, 1] - centroid[1]) * height_ratio
-    new_x = centroid[0] + dx
-    new_y = centroid[1] + dy
-    return np.stack((new_x, new_y), axis=1).astype(np.int32)
-
-
-def mask_scene(scene_image, bounding_box):
-    dst_shrunken = shrink_polygon(bounding_box.reshape(4, 2), width_ratio=0.6, height_ratio=0.9)
-    mask = np.ones(scene_image.shape, dtype=np.uint8) * 255
-    cv2.fillConvexPoly(mask, dst_shrunken, 0)
-    img_masked = cv2.bitwise_and(scene_image, mask)
-    return img_masked
-
-
 def format_and_print_results(all_results, scene_filename):
     print(f"Results for scene: {scene_filename}")
     print("------------------------------------")
@@ -355,10 +338,17 @@ def format_and_print_results(all_results, scene_filename):
         for i, inst in enumerate(instances, 1):
             corners = inst["corners_dict"]
             area = inst["area"]
+            formatted_corners = {k: tuple(map(int, v)) for k, v in corners.items()}
+
             print(
-                f"  Instance {i} {{top_left: {corners['top_left']}, top_right: {corners['top_right']}, "
-                f"bottom_right: {corners['bottom_right']}, bottom_left: {corners['bottom_left']}, area: {area:.0f}px}}"
+                f"  Instance {i} {{"
+                f"top_left: {formatted_corners['top_left']}, "
+                f"top_right: {formatted_corners['top_right']}, "
+                f"bottom_right: {formatted_corners['bottom_right']}, "
+                f"bottom_left: {formatted_corners['bottom_left']}, "
+                f"area: {area:.0f}px}}"
             )
+
     print("\n" + "=" * 50)
 
 
