@@ -10,6 +10,52 @@ from scipy.ndimage import maximum_filter
 logger = logging.getLogger(__name__)
 
 
+def calculate_iou(box_a, box_b):
+    """Compute IoU between two quadrilateral bounding boxes."""
+    x_a_min, y_a_min = np.min(box_a, axis=0).ravel()
+    x_a_max, y_a_max = np.max(box_a, axis=0).ravel()
+    x_b_min, y_b_min = np.min(box_b, axis=0).ravel()
+    x_b_max, y_b_max = np.max(box_b, axis=0).ravel()
+
+    inter_x_min = max(x_a_min, x_b_min)
+    inter_y_min = max(y_a_min, y_b_min)
+    inter_x_max = min(x_a_max, x_b_max)
+    inter_y_max = min(y_a_max, y_b_max)
+
+    inter_area = max(0, inter_x_max - inter_x_min) * max(0, inter_y_max - inter_y_min)
+
+    area_a = cv2.contourArea(box_a)
+    area_b = cv2.contourArea(box_b)
+
+    union_area = area_a + area_b - inter_area
+    iou = inter_area / union_area if union_area > 0 else 0
+
+    return iou
+
+
+def non_max_suppression(detections, iou_threshold=0.3):
+    """Suppress overlapping detections using IoU threshold."""
+    if not detections:
+        return []
+
+    detections = sorted(detections, key=lambda d: d["votes"], reverse=True)
+    kept = []
+
+    while detections:
+        best = detections.pop(0)
+        kept.append(best)
+
+        remaining_detections = []
+        for det in detections:
+            iou = calculate_iou(best["bounding_box"], det["bounding_box"])
+            if iou < iou_threshold:
+                remaining_detections.append(det)
+
+        detections = remaining_detections
+
+    return kept
+
+
 class Feature:
     def __init__(self, keypoint, descriptor):
         self.position = np.array(keypoint.pt)
@@ -104,6 +150,7 @@ class SiftGhtDetector:
         ratio_threshold=0.7,
         min_votes=2,
         nms_window_size=5,
+        nms_iou_threshold=0.3,
         min_match_count=4,
         min_area=1000,
         use_clahe=False,
@@ -114,6 +161,7 @@ class SiftGhtDetector:
         self.ratio_threshold = ratio_threshold
         self.min_votes = min_votes
         self.nms_window_size = nms_window_size
+        self.nms_iou_threshold = nms_iou_threshold
         self.min_match_count = min_match_count
         self.min_area = min_area
         self.use_clahe = use_clahe
@@ -308,10 +356,14 @@ class SiftGhtDetector:
                     }
                 )
 
-        if self.verbose:
-            logger.info(f"Detected {len(bounding_boxes)} model instances.")
+        filtered = non_max_suppression(bounding_boxes, self.nms_iou_threshold)
 
-        return peaks, accumulator, bounding_boxes
+        if self.verbose:
+            logger.info(
+                f"Detected {len(bounding_boxes)} raw instances, kept {len(filtered)} after NMS.",
+            )
+
+        return peaks, accumulator, filtered
 
 
 # ======================================================================================
