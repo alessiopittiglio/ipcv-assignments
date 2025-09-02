@@ -1,4 +1,6 @@
 assignment_1/dataset/
 assignment_2/ipcv-assignment-2/dataset/
+assignment_2/wandb/
+assignment_2/ckpts/
 __pycache__/
 .venv
