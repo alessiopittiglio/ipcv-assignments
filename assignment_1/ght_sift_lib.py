@@ -68,7 +68,7 @@ class Accumulator:
         self.grid[bin_y, bin_x] += 1
         self.votes_per_bin[bin_y][bin_x].append(match)
 
-    def find_peaks(self, min_votes=4, nms_window_size=5):
+    def find_peaks(self, min_votes, nms_window_size):
         if self.grid.max() < min_votes:
             return []
 
@@ -100,7 +100,6 @@ class SiftGhtDetector:
     def __init__(
         self,
         bin_size=6,
-        k=5,
         num_octave_layers=3,
         ratio_threshold=0.7,
         min_votes=2,
@@ -112,7 +111,6 @@ class SiftGhtDetector:
     ):
         self.sift = cv2.SIFT_create(nOctaveLayers=num_octave_layers)
         self.bin_size = bin_size
-        self.k = k
         self.ratio_threshold = ratio_threshold
         self.min_votes = min_votes
         self.nms_window_size = nms_window_size
