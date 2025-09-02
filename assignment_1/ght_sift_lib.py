@@ -304,10 +304,10 @@ class SiftGhtDetector:
 
         return accumulator
 
-    def calculate_homography(self, model_image, matches, model, target_features):
+    def estimate_affine_transform(self, model_image, matches, model, target_features):
         if len(matches) < 3:
             if self.verbose:
-                logger.info("Not enough matches to compute homography.")
+                logger.info("Not enough matches to compute transformation.")
             return None
 
         src_pts = np.float32(
@@ -317,42 +317,21 @@ class SiftGhtDetector:
             [target_features[m.trainIdx].position for m in matches]
         ).reshape(-1, 1, 2)
 
-        if len(matches) >= 4:
-            M, _ = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
+        M_affine, _ = cv2.estimateAffinePartial2D(src_pts, dst_pts, method=cv2.RANSAC)
+        if M_affine is None:
+            return None
 
-            if M is not None:
-                h, w = model_image.shape[:2]
-                corners = np.float32(
-                    [[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]]
-                ).reshape(-1, 1, 2)
-                dst = cv2.perspectiveTransform(corners, M)
+        h, w = model_image.shape[:2]
+        corners = np.float32([[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]]).reshape(
+            -1, 1, 2
+        )
+        dst = cv2.transform(corners, M_affine)
+        return np.int32(dst)
 
-                area = cv2.contourArea(dst)
-                min_coord = dst.min()
 
-                if area > self.min_area and min_coord >= 0:
-                    if self.verbose:
-                        logger.info(
-                            f"Valid homography found. Bounding box area: {area:.2f}"
-                        )
-                    return np.int32(dst)
 
-        if self.verbose:
-            logger.info("Fallback to affine transformation.")
-        if len(matches) >= 3:
-            M_affine, _ = cv2.estimateAffinePartial2D(
-                src_pts, dst_pts, method=cv2.RANSAC
-            )
 
-            if M_affine is not None:
-                h, w = model_image.shape[:2]
-                corners = np.float32(
-                    [[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]]
-                ).reshape(-1, 1, 2)
-                dst = cv2.transform(corners, M_affine)
-                return np.int32(dst)
 
-        return None
 
     def _preprocess_image(self, image):
         if self.use_clahe:
@@ -410,7 +389,7 @@ class SiftGhtDetector:
         bounding_boxes = []
         for peak in peaks:
             matches = peak["contributing_matches"]
-            bbox = self.calculate_homography(
+            bbox = self.estimate_affine_transform(
                 model_image, matches, model, target_features
             )
             if bbox is not None:
