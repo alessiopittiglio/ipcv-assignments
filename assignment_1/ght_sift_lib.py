@@ -101,14 +101,16 @@ class SiftGhtDetector:
         self,
         bin_size=6,
         k=5,
+        num_octave_layers=3,
         ratio_threshold=0.7,
         min_votes=2,
         nms_window_size=5,
         min_match_count=4,
         min_area=1000,
+        use_clahe=False,
         verbose=False,
     ):
-        self.sift = cv2.SIFT_create()
+        self.sift = cv2.SIFT_create(nOctaveLayers=num_octave_layers)
         self.bin_size = bin_size
         self.k = k
         self.ratio_threshold = ratio_threshold
@@ -116,10 +118,16 @@ class SiftGhtDetector:
         self.nms_window_size = nms_window_size
         self.min_match_count = min_match_count
         self.min_area = min_area
+        self.use_clahe = use_clahe
         self.verbose = verbose
 
+        self.clahe = (
+            cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)) if use_clahe else None
+        )
+
     def detect_and_compute(self, image):
-        keypoints, descriptors = self.sift.detectAndCompute(image, None)
+        processed_image = self._preprocess_image(image)
+        keypoints, descriptors = self.sift.detectAndCompute(processed_image, None)
         features = [Feature(kp, desc) for kp, desc in zip(keypoints, descriptors)]
 
         if self.verbose:
@@ -245,7 +253,14 @@ class SiftGhtDetector:
         if self.verbose:
             logger.info("Fallback to affine transformation.")
 
-        return np.int32(dst)
+    def _preprocess_image(self, image):
+        if self.use_clahe:
+            lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+            l, a, b = cv2.split(lab)
+            cl = self.clahe.apply(l)
+            return cl
+
+        return image
 
     def detect(self, model_image, target_image):
         model = self.build_model(model_image)
