@@ -212,7 +212,7 @@ class SiftGhtDetector:
         return accumulator
 
     def calculate_homography(self, model_image, matches, model, target_features):
-        if len(matches) < self.min_match_count:
+        if len(matches) < 3:
             if self.verbose:
                 logger.info("Not enough matches to compute homography.")
             return None
@@ -224,32 +224,42 @@ class SiftGhtDetector:
             [target_features[m.trainIdx].position for m in matches]
         ).reshape(-1, 1, 2)
 
-        M, _ = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
+        if len(matches) >= 4:
+            M, _ = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
 
-        if M is None:
-            if self.verbose:
-                logger.info("Homography estimation failed.")
-            return None
+            if M is not None:
+                h, w = model_image.shape[:2]
+                corners = np.float32(
+                    [[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]]
+                ).reshape(-1, 1, 2)
+                dst = cv2.perspectiveTransform(corners, M)
 
-        h, w = model_image.shape[:2]
-        corners = np.float32([[0, 0], [0, h - 1], [w - 1, h - 1], [w - 1, 0]]).reshape(
-            -1, 1, 2
-        )
-        dst = cv2.perspectiveTransform(corners, M)
+                area = cv2.contourArea(dst)
+                min_coord = dst.min()
 
-        area = cv2.contourArea(dst)
-        min_coord = dst.min()
-
-        if area > self.min_area and min_coord >= 0:
-            if self.verbose:
-                logger.info(f"Valid homography found. Bounding box area: {area:.2f}")
-            return np.int32(dst)
-
-        M_affine, _ = cv2.estimateAffinePartial2D(src_pts, dst_pts, method=cv2.RANSAC)
-        dst = cv2.transform(corners, M_affine)
+                if area > self.min_area and min_coord >= 0:
+                    if self.verbose:
+                        logger.info(
+                            f"Valid homography found. Bounding box area: {area:.2f}"
+                        )
+                    return np.int32(dst)
 
         if self.verbose:
             logger.info("Fallback to affine transformation.")
+        if len(matches) >= 3:
+            M_affine, _ = cv2.estimateAffinePartial2D(
+                src_pts, dst_pts, method=cv2.RANSAC
+            )
+
+            if M_affine is not None:
+                h, w = model_image.shape[:2]
+                corners = np.float32(
+                    [[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]]
+                ).reshape(-1, 1, 2)
+                dst = cv2.transform(corners, M_affine)
+                return np.int32(dst)
+
+        return None
 
     def _preprocess_image(self, image):
         if self.use_clahe:
