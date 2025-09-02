@@ -421,6 +421,11 @@ class SiftGhtDetector:
         if self.verbose:
             logger.info(f"Found {len(peaks)} peaks in accumulator.")
 
+        max_votes = max(p["votes"] for p in peaks)
+        dynamic_min_votes = int(max_votes * self.min_votes_ratio)
+        final_min_votes_threshold = max(self.min_votes, dynamic_min_votes)
+        peaks = [p for p in peaks if p["votes"] >= final_min_votes_threshold]
+
         bounding_boxes = []
         for peak in peaks:
             matches = peak["contributing_matches"]
