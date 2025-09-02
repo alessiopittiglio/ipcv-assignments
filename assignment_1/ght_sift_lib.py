@@ -6,6 +6,7 @@ import cv2
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.ndimage import maximum_filter
+from skimage.metrics import structural_similarity as ssim
 
 logger = logging.getLogger(__name__)
 
@@ -183,6 +184,8 @@ class SiftGhtDetector:
         min_area=1000,
         dispersion_threshold=0.1,
         use_clahe=False,
+        use_structural_similarity_filter=False,
+        ssim_threshold=0.3,
         adaptive_strategy=True,
         laplacian_var_threshold=2200,
         verbose=False,
@@ -198,6 +201,8 @@ class SiftGhtDetector:
         self.min_area = min_area
         self.dispersion_threshold = dispersion_threshold
         self.use_clahe = use_clahe
+        self.use_structural_similarity_filter = use_structural_similarity_filter
+        self.ssim_threshold = ssim_threshold
         self.adaptive_strategy = adaptive_strategy
         self.laplacian_var_threshold = laplacian_var_threshold
         self.verbose = verbose
@@ -331,12 +336,46 @@ class SiftGhtDetector:
         dst = cv2.transform(corners, M_affine)
         return np.int32(dst)
 
+    def filter_by_structural_similarity(self, detections, model_image, target_image):
+        if not detections:
+            return []
 
+        model_gray = cv2.cvtColor(model_image, cv2.COLOR_BGR2GRAY)
+        h, w = model_gray.shape
 
+        kept_detections = []
+        for det in detections:
+            bbox = det["bounding_box"]
 
+            dst_pts = np.float32([[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]])
+            src_pts = np.float32(bbox).reshape(4, 2)
 
+            transform_matrix = cv2.getPerspectiveTransform(src_pts, dst_pts)
 
+            warped_patch = cv2.warpPerspective(target_image, transform_matrix, (w, h))
+            warped_patch_gray = cv2.cvtColor(warped_patch, cv2.COLOR_BGR2GRAY)
 
+            score = ssim(
+                model_gray,
+                warped_patch_gray,
+                data_range=warped_patch_gray.max() - warped_patch_gray.min(),
+            )
+
+            if score >= self.ssim_threshold:
+                if self.verbose:
+                    logger.info(
+                        f"Detection at {det['position']} PASSED structural check "
+                        f"(SSIM: {score:.3f})."
+                    )
+                kept_detections.append(det)
+            else:
+                if self.verbose:
+                    logger.warning(
+                        f"Detection at {det['position']} REJECTED by structural check "
+                        f"(SSIM: {score:.3f} < {self.ssim_threshold})."
+                    )
+
+        return kept_detections
 
     def detect(self, model_image, target_image):
         use_alternative = False
@@ -409,6 +448,10 @@ class SiftGhtDetector:
         if self.verbose:
             logger.info(
                 f"Detected {len(bounding_boxes)} raw instances, kept {len(filtered)} after NMS.",
+            )
+        if self.use_structural_similarity_filter:
+            filtered = self.filter_by_structural_similarity(
+                filtered, model_image, target_image
             )
 
         return peaks, accumulator, filtered
