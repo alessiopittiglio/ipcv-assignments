@@ -206,6 +206,13 @@ class SiftGhtDetector:
             cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)) if use_clahe else None
         )
 
+    def _preprocess_image(self, image):
+        if self.clahe is None:
+            return image
+        lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+        l, a, b = cv2.split(lab)
+        cl = self.clahe.apply(l)
+        return cl
 
     def detect_and_compute(self, image, use_alternative_strategy=False):
         if use_alternative_strategy:
@@ -333,14 +340,7 @@ class SiftGhtDetector:
 
 
 
-    def _preprocess_image(self, image):
-        if self.use_clahe:
-            lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
-            l, a, b = cv2.split(lab)
-            cl = self.clahe.apply(l)
-            return cl
 
-        return image
 
     def detect(self, model_image, target_image):
         use_alternative = False
