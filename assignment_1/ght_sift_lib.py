@@ -230,7 +230,6 @@ class SiftGhtDetector:
         features = [Feature(kp, desc) for kp, desc in zip(keypoints, descriptors)]
         if self.verbose:
             logger.info(f"Detected {len(features)} features.")
-
         return features
 
     def build_model(self, model_image, use_alternative_strategy=False):
@@ -240,13 +239,11 @@ class SiftGhtDetector:
             model.add_feature(feature)
         model.compute_barycenter()
         model.compute_joining_vectors()
-
         if self.verbose:
             logger.info(
                 f"Model built with {len(model.features)} features. "
                 f"Barycenter: {model.barycenter}."
             )
-
         return model
 
     def match_features(self, model, target_features):
@@ -274,7 +271,6 @@ class SiftGhtDetector:
 
         if self.verbose:
             logger.info(f"Found {len(good_matches)} good matches.")
-
         return good_matches
 
     def apply_scale_rotation(self, joining_vector, scale, rotation):
