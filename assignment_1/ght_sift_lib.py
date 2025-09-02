@@ -1,6 +1,7 @@
 import math
 import re
 import logging
+from dataclasses import dataclass
 
 import cv2
 import numpy as np
@@ -171,44 +172,36 @@ class Accumulator:
         return local_density_score
 
 
+@dataclass
+class DetectorConfig:
+    bin_size: int = 6
+    num_octave_layers: int = 3
+    ratio_threshold: float = 0.7
+    min_votes: int = 2
+    nms_window_size: int = 5
+    nms_iou_threshold: float = 0.3
+    min_match_count: int = 4
+    min_area: int = 1000
+    dispersion_threshold: float = 0.1
+    use_clahe: bool = False
+    use_structural_similarity_filter: bool = False
+    ssim_threshold: float = 0.3
+    adaptive_strategy: bool = True
+    min_votes_ratio: float = 0.1
+    laplacian_var_threshold: int = 2200
+    verbose: bool = False
+
+
 class SiftGhtDetector:
-    def __init__(
-        self,
-        bin_size=6,
-        num_octave_layers=3,
-        ratio_threshold=0.7,
-        min_votes=2,
-        nms_window_size=5,
-        nms_iou_threshold=0.3,
-        min_match_count=4,
-        min_area=1000,
-        dispersion_threshold=0.1,
-        use_clahe=False,
-        use_structural_similarity_filter=False,
-        ssim_threshold=0.3,
-        adaptive_strategy=True,
-        laplacian_var_threshold=2200,
-        verbose=False,
-    ):
-        self.sift_default = cv2.SIFT_create(nOctaveLayers=num_octave_layers)
+    def __init__(self, config: DetectorConfig):
+        self.config = config
+        self.sift_default = cv2.SIFT_create(nOctaveLayers=config.num_octave_layers)
         self.sift_alternative = cv2.SIFT_create()
-        self.bin_size = bin_size
-        self.ratio_threshold = ratio_threshold
-        self.min_votes = min_votes
-        self.nms_window_size = nms_window_size
-        self.nms_iou_threshold = nms_iou_threshold
-        self.min_match_count = min_match_count
-        self.min_area = min_area
-        self.dispersion_threshold = dispersion_threshold
-        self.use_clahe = use_clahe
-        self.use_structural_similarity_filter = use_structural_similarity_filter
-        self.ssim_threshold = ssim_threshold
-        self.adaptive_strategy = adaptive_strategy
-        self.laplacian_var_threshold = laplacian_var_threshold
-        self.verbose = verbose
 
         self.clahe = (
-            cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)) if use_clahe else None
+            cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            if config.use_clahe
+            else None
         )
 
     def _preprocess_image(self, image):
