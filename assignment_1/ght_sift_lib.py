@@ -141,6 +141,34 @@ class Accumulator:
         peaks.sort(key=lambda p: p["votes"], reverse=True)
         return peaks
 
+    def calculate_local_density(self, window_size=21):
+        if window_size % 2 == 0:
+            raise ValueError("window_size must be an odd number.")
+
+        peak_value = np.max(self.grid)
+        if peak_value == 0:
+            return 0.0
+
+        peak_coords = np.unravel_index(np.argmax(self.grid), self.grid.shape)
+        half_win = window_size // 2
+
+        r_start = max(0, peak_coords[0] - half_win)
+        r_end = min(self.grid.shape[0], peak_coords[0] + half_win + 1)
+        c_start = max(0, peak_coords[1] - half_win)
+        c_end = min(self.grid.shape[1], peak_coords[1] + half_win + 1)
+
+        local_window = self.grid[r_start:r_end, c_start:c_end]
+
+        local_energy = np.sum(local_window)
+
+        window_area = local_window.size
+        if window_area == 0:
+            return 0.0
+
+        local_density_score = local_energy / window_area
+
+        return local_density_score
+
 
 class SiftGhtDetector:
     def __init__(
@@ -153,6 +181,7 @@ class SiftGhtDetector:
         nms_iou_threshold=0.3,
         min_match_count=4,
         min_area=1000,
+        dispersion_threshold=0.1,
         use_clahe=False,
         verbose=False,
     ):
@@ -164,6 +193,7 @@ class SiftGhtDetector:
         self.nms_iou_threshold = nms_iou_threshold
         self.min_match_count = min_match_count
         self.min_area = min_area
+        self.dispersion_threshold = dispersion_threshold
         self.use_clahe = use_clahe
         self.verbose = verbose
 
@@ -330,6 +360,17 @@ class SiftGhtDetector:
         peaks = accumulator.find_peaks(
             min_votes=self.min_votes, nms_window_size=self.nms_window_size
         )
+
+        score = accumulator.calculate_local_density()
+        if score < self.dispersion_threshold:
+            if self.verbose:
+                logger.warning(
+                    "Spatial dispersion score %.4f below threshold %.4f, "
+                    "rejecting detection.",
+                    score,
+                    self.dispersion_threshold,
+                )
+            return [], accumulator, []
 
         if self.verbose:
             logger.info(f"Found {len(peaks)} peaks in accumulator.")
