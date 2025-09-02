@@ -183,9 +183,12 @@ class SiftGhtDetector:
         min_area=1000,
         dispersion_threshold=0.1,
         use_clahe=False,
+        adaptive_strategy=True,
+        laplacian_var_threshold=2200,
         verbose=False,
     ):
-        self.sift = cv2.SIFT_create(nOctaveLayers=num_octave_layers)
+        self.sift_default = cv2.SIFT_create(nOctaveLayers=num_octave_layers)
+        self.sift_alternative = cv2.SIFT_create()
         self.bin_size = bin_size
         self.ratio_threshold = ratio_threshold
         self.min_votes = min_votes
@@ -195,24 +198,36 @@ class SiftGhtDetector:
         self.min_area = min_area
         self.dispersion_threshold = dispersion_threshold
         self.use_clahe = use_clahe
+        self.adaptive_strategy = adaptive_strategy
+        self.laplacian_var_threshold = laplacian_var_threshold
         self.verbose = verbose
 
         self.clahe = (
             cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)) if use_clahe else None
         )
 
-    def detect_and_compute(self, image):
-        processed_image = self._preprocess_image(image)
-        keypoints, descriptors = self.sift.detectAndCompute(processed_image, None)
-        features = [Feature(kp, desc) for kp, desc in zip(keypoints, descriptors)]
 
+    def detect_and_compute(self, image, use_alternative_strategy=False):
+        if use_alternative_strategy:
+            if self.verbose:
+                logger.info("Using ALTERNATIVE strategy (3 octaves, no CLAHE).")
+            sift_detector = self.sift_alternative
+            processed = image
+        else:
+            if self.verbose:
+                logger.info("Using DEFAULT strategy (5 octaves, with CLAHE).")
+            processed = self._preprocess_image(image)
+            sift_detector = self.sift_default
+
+        keypoints, descriptors = sift_detector.detectAndCompute(processed, None)
+        features = [Feature(kp, desc) for kp, desc in zip(keypoints, descriptors)]
         if self.verbose:
             logger.info(f"Detected {len(features)} features.")
 
         return features
 
-    def build_model(self, model_image):
-        features = self.detect_and_compute(model_image)
+    def build_model(self, model_image, use_alternative_strategy=False):
+        features = self.detect_and_compute(model_image, use_alternative_strategy)
         model = StarModel()
         for feature in features:
             model.add_feature(feature)
@@ -349,8 +364,25 @@ class SiftGhtDetector:
         return image
 
     def detect(self, model_image, target_image):
-        model = self.build_model(model_image)
-        target_features = self.detect_and_compute(target_image)
+        use_alternative = False
+        if self.adaptive_strategy:
+            target_gray = cv2.cvtColor(target_image, cv2.COLOR_BGR2GRAY)
+            laplacian_var = cv2.Laplacian(target_gray, cv2.CV_64F).var()
+
+            if laplacian_var > self.laplacian_var_threshold:
+                if self.verbose:
+                    logger.warning(
+                        "High Laplacian variance detected (%.2f > %.2f). "
+                        "Switching to robust strategy.",
+                        laplacian_var,
+                        self.laplacian_var_threshold,
+                    )
+                use_alternative = True
+
+        model = self.build_model(model_image, use_alternative_strategy=use_alternative)
+        target_features = self.detect_and_compute(
+            target_image, use_alternative_strategy=use_alternative
+        )
         good_matches = self.match_features(model, target_features)
 
         accumulator = self.vote_for_reference_points(
